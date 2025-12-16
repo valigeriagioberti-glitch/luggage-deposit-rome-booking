@@ -3,8 +3,14 @@ import Header from './components/Header';
 import BookingForm from './components/BookingForm';
 import SummaryCard from './components/SummaryCard';
 import SuccessView from './components/SuccessView';
-import { BagSize, BookingDetails, PaymentStatus, BagQuantities } from './types';
-import { calculateBillableDays, calculateTotal, processMockStripePayment, saveBooking, generateBookingId } from './services/bookingService';
+import { BagSize, BookingDetails, BagQuantities } from './types';
+import {
+  calculateBillableDays,
+  calculateTotal,
+  startStripeCheckout,
+  saveBooking,
+  generateBookingId
+} from './services/bookingService';
 import { Loader2 } from 'lucide-react';
 
 const App: React.FC = () => {
@@ -22,8 +28,9 @@ const App: React.FC = () => {
     customerPhone: ''
   });
 
-  const [billableDays, setBillableDays] = useState(0);
-  const [totalPrice, setTotalPrice] = useState(0);
+  const [billableDays, setBillableDays] = useState<number>(0);
+
+  const [totalPrice, setTotalPrice] = useState<number>(0);
   const [status, setStatus] = useState<'input' | 'processing' | 'success'>('input');
   const [completedBooking, setCompletedBooking] = useState<BookingDetails | null>(null);
 
@@ -31,16 +38,30 @@ const App: React.FC = () => {
   useEffect(() => {
     const days = calculateBillableDays(formData.dropOffDate, formData.pickUpDate);
     const total = calculateTotal(formData.bagQuantities, days);
-    
+
     setBillableDays(days);
     setTotalPrice(total);
   }, [formData]);
 
-  // Load persisted booking if exists (optional feature to persist success screen on refresh)
+  // If Stripe redirects back to /booking/success, restore the latest booking (so receipt works)
   useEffect(() => {
-    // This is a simple implementation. In a real app we might check URL params or session storage more strictly.
-    // For now, we start fresh on refresh to allow new bookings, unless we want to restore state.
-    // Leaving standard refresh behavior.
+    const params = new URLSearchParams(window.location.search);
+    const sessionId = params.get('session_id');
+
+    // If we're on success URL (your router should render SuccessView there),
+    // we can restore booking details from localStorage.
+    if (sessionId) {
+      const latest = localStorage.getItem('latestBooking');
+      if (latest) {
+        try {
+          const parsed: BookingDetails = JSON.parse(latest);
+          setCompletedBooking(parsed);
+          setStatus('success');
+        } catch {
+          // ignore
+        }
+      }
+    }
   }, []);
 
   // Handlers
@@ -48,14 +69,14 @@ const App: React.FC = () => {
     setFormData(prev => {
       // Logic constraint: Pickup cannot be before dropoff
       if (field === 'dropOffDate') {
-         if (prev.pickUpDate && new Date(value) > new Date(prev.pickUpDate)) {
-            return { ...prev, [field]: value, pickUpDate: value };
-         }
+        if (prev.pickUpDate && new Date(value) > new Date(prev.pickUpDate)) {
+          return { ...prev, [field]: value, pickUpDate: value };
+        }
       }
       if (field === 'pickUpDate') {
-         if (prev.dropOffDate && new Date(value) < new Date(prev.dropOffDate)) {
-            return prev; // Do nothing if trying to select invalid date
-         }
+        if (prev.dropOffDate && new Date(value) < new Date(prev.dropOffDate)) {
+          return prev; // Do nothing if trying to select invalid date
+        }
       }
       return { ...prev, [field]: value };
     });
@@ -76,53 +97,60 @@ const App: React.FC = () => {
   };
 
   const handlePayAndReserve = async () => {
-    const totalBags = Object.values(formData.bagQuantities).reduce((a: number, b: number) => a + b, 0);
-
-    if (totalBags === 0) {
-      alert("Please select at least one bag.");
-      return;
-    }
-    if (!formData.customerName.trim() || !formData.customerEmail.trim() || !formData.customerPhone.trim()) {
-      alert("Please enter your name, email address, and phone number.");
-      return;
-    }
-    if (billableDays <= 0) {
-      alert("Please select valid dates.");
-      return;
-    }
-
-    setStatus('processing');
-
     try {
-      // 1. Simulate Stripe Checkout
-      const paymentResult = await processMockStripePayment(totalPrice);
+      // Basic UI validations
+      const totalBags = (Object.values(formData.bagQuantities) as number[])
+  .reduce((a, b) => a + b, 0);
 
-      if (paymentResult.success) {
-        // 2. Create Booking Object
-        const booking: BookingDetails = {
-          id: generateBookingId(),
-          bagQuantities: formData.bagQuantities,
-          dropOffDate: formData.dropOffDate,
-          pickUpDate: formData.pickUpDate,
-          customerName: formData.customerName,
-          customerEmail: formData.customerEmail,
-          customerPhone: formData.customerPhone,
-          billableDays,
-          totalPrice,
-          paymentStatus: PaymentStatus.Paid,
-          stripePaymentId: paymentResult.id,
-          timestamp: new Date().toISOString()
-        };
-
-        // 3. Save Data
-        saveBooking(booking);
-        setCompletedBooking(booking);
-        setStatus('success');
-        window.scrollTo(0,0);
+      if (!formData.dropOffDate || !formData.pickUpDate) {
+        alert("Please select drop-off and pick-up dates.");
+        return;
       }
-    } catch (error) {
+      if (billableDays < 1) {
+        alert("Please select valid dates.");
+        return;
+      }
+      if (totalBags < 1) {
+        alert("Please select at least 1 bag.");
+        return;
+      }
+
+      setStatus('processing');
+
+      // Create booking object BEFORE redirect
+      const bookingId = generateBookingId();
+      const booking: BookingDetails = {
+        id: bookingId,
+        bagQuantities: formData.bagQuantities,
+        dropOffDate: formData.dropOffDate,
+        pickUpDate: formData.pickUpDate,
+        customerName: formData.customerName,
+        customerEmail: formData.customerEmail,
+        customerPhone: formData.customerPhone,
+        billableDays,
+        totalPrice,
+        // Keep any extra fields optional if your type allows it
+        timestamp: new Date().toISOString()
+      } as any;
+
+      // Save booking locally (also sets latestBooking)
+      saveBooking(booking);
+
+      // Redirect to Stripe Checkout (Stripe handles payment)
+      await startStripeCheckout({
+        bookingId,
+        dropOffDate: formData.dropOffDate,
+        pickUpDate: formData.pickUpDate,
+        billableDays,
+        bagQuantities: formData.bagQuantities
+      });
+
+      // NOTE: We do NOT set success here.
+      // Stripe will redirect the customer back to /booking/success.
+
+    } catch (error: any) {
       console.error(error);
-      alert("Payment failed. Please try again.");
+      alert(error?.message || "Payment failed. Please try again.");
       setStatus('input');
     }
   };
@@ -170,19 +198,18 @@ const App: React.FC = () => {
 
             {/* Layout Grid */}
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 items-start">
-              
               {/* Form Section */}
               <div className="lg:col-span-2">
-                 <BookingForm 
-                    formData={formData} 
-                    onChange={handleInputChange}
-                    onQuantityChange={handleQuantityChange}
-                 />
+                <BookingForm
+                  formData={formData}
+                  onChange={handleInputChange}
+                  onQuantityChange={handleQuantityChange}
+                />
               </div>
 
               {/* Summary Section - Sticky Desktop */}
               <div className="hidden md:block lg:col-span-1">
-                <SummaryCard 
+                <SummaryCard
                   {...formData}
                   billableDays={billableDays}
                   totalPrice={totalPrice}
@@ -203,26 +230,37 @@ const App: React.FC = () => {
               <span className="text-xs text-gray-500 font-medium">Total Price</span>
               <span className="text-xl font-bold text-green-900">€{totalPrice.toFixed(2)}</span>
             </div>
-            <button 
+
+            <div className="text-xs text-red-600 mb-2">
+  disabled: {String(status === 'processing' || !formData.dropOffDate || !formData.pickUpDate || totalBags === 0)} |
+  status={status} |
+  dropOff={String(!!formData.dropOffDate)} |
+  pickUp={String(!!formData.pickUpDate)} |
+  totalBags={totalBags}
+</div>
+
+            <button
               onClick={handlePayAndReserve}
               disabled={status === 'processing' || !formData.dropOffDate || !formData.pickUpDate || totalBags === 0}
               className={`flex-1 py-3 px-6 rounded-lg font-bold text-white shadow-md
-                ${status === 'processing' || !formData.dropOffDate || totalBags === 0 ? 'bg-gray-300' : 'bg-green-900 active:bg-green-800'}`}
+                ${status === 'processing' || !formData.dropOffDate || !formData.pickUpDate || totalBags === 0
+                  ? 'bg-gray-300'
+                  : 'bg-green-900 active:bg-green-800'}`}
             >
               {status === 'processing' ? <Loader2 className="animate-spin mx-auto" /> : 'Pay & Reserve'}
             </button>
           </div>
         </div>
       )}
-      
-      {/* Visual Overlay for Mock Processing */}
+
+      {/* Processing Overlay */}
       {status === 'processing' && (
         <div className="fixed inset-0 bg-white/80 backdrop-blur-sm z-[60] flex flex-col items-center justify-center print:hidden">
-           <div className="bg-white p-8 rounded-2xl shadow-2xl border border-gray-100 flex flex-col items-center text-center max-w-sm mx-4">
-              <div className="w-16 h-16 border-4 border-green-900 border-t-transparent rounded-full animate-spin mb-6"></div>
-              <h3 className="text-xl font-bold text-gray-900 mb-2">Connecting to Stripe</h3>
-              <p className="text-gray-500">Please wait while we secure your payment channel...</p>
-           </div>
+          <div className="bg-white p-8 rounded-2xl shadow-2xl border border-gray-100 flex flex-col items-center text-center max-w-sm mx-4">
+            <div className="w-16 h-16 border-4 border-green-900 border-t-transparent rounded-full animate-spin mb-6"></div>
+            <h3 className="text-xl font-bold text-gray-900 mb-2">Redirecting to Stripe</h3>
+            <p className="text-gray-500">Please wait while we open secure checkout...</p>
+          </div>
         </div>
       )}
     </div>
