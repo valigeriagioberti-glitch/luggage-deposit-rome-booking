@@ -1,20 +1,18 @@
 import Stripe from "stripe";
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
-
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).send("Method not allowed");
   }
 
   try {
+    const stripeKey = process.env.STRIPE_SECRET_KEY;
     const siteUrl = process.env.SITE_URL;
-    if (!process.env.STRIPE_SECRET_KEY) {
-      return res.status(500).json({ error: "Missing STRIPE_SECRET_KEY" });
-    }
-    if (!siteUrl) {
-      return res.status(500).json({ error: "Missing SITE_URL" });
-    }
+
+    if (!stripeKey) return res.status(500).json({ error: "Missing STRIPE_SECRET_KEY" });
+    if (!siteUrl) return res.status(500).json({ error: "Missing SITE_URL" });
+
+    const stripe = new Stripe(stripeKey);
 
     const { items, billableDays, bookingId, dropOffDate, pickUpDate } = req.body || {};
     const days = Number(billableDays);
@@ -27,9 +25,9 @@ export default async function handler(req, res) {
         price_data: {
           currency: "eur",
           product_data: { name: `${i.label} bag` },
-          unit_amount: Number(i.unitAmount) * days, // cents
+          unit_amount: Number(i.unitAmount) * days // cents for all days
         },
-        quantity: Number(i.qty),
+        quantity: Number(i.qty)
       }));
 
     if (!line_items.length) return res.status(400).json({ error: "No items selected" });
@@ -43,8 +41,8 @@ export default async function handler(req, res) {
       metadata: {
         dropOffDate: String(dropOffDate || ""),
         pickUpDate: String(pickUpDate || ""),
-        billableDays: String(days),
-      },
+        billableDays: String(days)
+      }
     });
 
     return res.status(200).json({ url: session.url });
