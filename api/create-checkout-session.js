@@ -50,3 +50,25 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: err.message || "Server error" });
   }
 }
+
+// inside your create session handler:
+const { booking } = req.body; // booking contains bookingRef, days, bags, total, etc.
+
+const session = await stripe.checkout.sessions.create({
+  mode: "payment",
+  line_items,
+  success_url: `${origin}/booking/success?session_id={CHECKOUT_SESSION_ID}`,
+  cancel_url: `${origin}/?canceled=1`,
+
+  // ✅ attach identifiers
+  metadata: {
+    bookingRef: booking.bookingRef,      // e.g. "LDR-2025-000123"
+    bookingId: booking.id,               // your uuid
+    dropoff: booking.dropoffDate,
+    pickup: booking.pickupDate,
+  },
+
+  // optional (helpful for receipts/invoices)
+  customer_email: booking.email || undefined,
+});
+
