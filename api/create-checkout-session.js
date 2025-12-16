@@ -1,9 +1,5 @@
 const Stripe = require("stripe");
 
-export const config = {
-  runtime: "nodejs",
-};
-
 module.exports = async (req, res) => {
   if (req.method !== "POST") {
     return res.status(405).send("Method not allowed");
@@ -19,11 +15,9 @@ module.exports = async (req, res) => {
     const stripe = new Stripe(stripeKey);
 
     const { items, billableDays, bookingId, dropOffDate, pickUpDate } = req.body || {};
+    const days = Number(billableDays);
 
-    const safeDays = Number(billableDays);
-    if (!safeDays || safeDays < 1) {
-      return res.status(400).json({ error: "Invalid billableDays" });
-    }
+    if (!days || days < 1) return res.status(400).json({ error: "Invalid billableDays" });
 
     const line_items = (items || [])
       .filter((i) => Number(i.qty) > 0)
@@ -31,14 +25,12 @@ module.exports = async (req, res) => {
         price_data: {
           currency: "eur",
           product_data: { name: `${i.label} bag` },
-          unit_amount: Number(i.unitAmount) * safeDays, // cents
+          unit_amount: Number(i.unitAmount) * days
         },
-        quantity: Number(i.qty),
+        quantity: Number(i.qty)
       }));
 
-    if (!line_items.length) {
-      return res.status(400).json({ error: "No items selected" });
-    }
+    if (!line_items.length) return res.status(400).json({ error: "No items selected" });
 
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
@@ -49,8 +41,8 @@ module.exports = async (req, res) => {
       metadata: {
         dropOffDate: String(dropOffDate || ""),
         pickUpDate: String(pickUpDate || ""),
-        billableDays: String(safeDays),
-      },
+        billableDays: String(days)
+      }
     });
 
     return res.status(200).json({ url: session.url });
