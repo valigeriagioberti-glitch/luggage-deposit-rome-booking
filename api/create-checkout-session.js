@@ -1,74 +1,64 @@
 import Stripe from "stripe";
 
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+
 export default async function handler(req, res) {
   if (req.method !== "POST") {
-    return res.status(405).send("Method not allowed");
+    return res.status(405).json({ error: "Method not allowed" });
   }
 
   try {
-    const stripeKey = process.env.STRIPE_SECRET_KEY;
-    const siteUrl = process.env.SITE_URL;
+    const {
+      lineItems,
+      booking,
+      customerEmail,
+    } = req.body || {};
 
-    if (!stripeKey) return res.status(500).json({ error: "Missing STRIPE_SECRET_KEY" });
-    if (!siteUrl) return res.status(500).json({ error: "Missing SITE_URL" });
+    if (!process.env.STRIPE_SECRET_KEY) {
+      throw new Error("Missing STRIPE_SECRET_KEY");
+    }
 
-    const stripe = new Stripe(stripeKey);
+    if (!Array.isArray(lineItems) || lineItems.length === 0) {
+      return res.status(400).json({ error: "lineItems missing or empty" });
+    }
 
-    const { items, billableDays, bookingId, dropOffDate, pickUpDate } = req.body || {};
-    const days = Number(billableDays);
+    // ✅ filter out zero quantities
+    const filteredItems = lineItems.filter(
+      (item) => Number(item.quantity) > 0
+    );
 
-    if (!days || days < 1) return res.status(400).json({ error: "Invalid billableDays" });
+    if (filteredItems.length === 0) {
+      return res.status(400).json({ error: "All quantities are zero" });
+    }
 
-    const line_items = (items || [])
-      .filter((i) => Number(i.qty) > 0)
-      .map((i) => ({
-        price_data: {
-          currency: "eur",
-          product_data: { name: `${i.label} bag` },
-          unit_amount: Number(i.unitAmount) * days // cents for all days
-        },
-        quantity: Number(i.qty)
-      }));
-
-    if (!line_items.length) return res.status(400).json({ error: "No items selected" });
+    // ✅ origin must be derived INSIDE handler
+    const origin = req.headers.origin || "https://example.com";
 
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
-      line_items,
-      success_url: `${siteUrl}/booking/success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${siteUrl}/booking?canceled=1`,
-      client_reference_id: bookingId || undefined,
-      metadata: {
-        dropOffDate: String(dropOffDate || ""),
-        pickUpDate: String(pickUpDate || ""),
-        billableDays: String(days)
-      }
+      line_items: filteredItems,
+
+      success_url: `${origin}/booking/success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${origin}/?canceled=1`,
+
+      customer_email: customerEmail || undefined,
+
+      metadata: booking
+        ? {
+            bookingRef: booking.bookingRef || "",
+            bookingId: booking.id || "",
+            dropoff: booking.dropoffDate || "",
+            pickup: booking.pickupDate || "",
+          }
+        : undefined,
     });
 
     return res.status(200).json({ url: session.url });
   } catch (err) {
-    return res.status(500).json({ error: err.message || "Server error" });
+    console.error("Stripe Checkout Error:", err);
+
+    return res.status(500).json({
+      error: err.message || "Stripe checkout failed",
+    });
   }
 }
-
-// inside your create session handler:
-const { booking } = req.body; // booking contains bookingRef, days, bags, total, etc.
-
-const session = await stripe.checkout.sessions.create({
-  mode: "payment",
-  line_items,
-  success_url: `${origin}/booking/success?session_id={CHECKOUT_SESSION_ID}`,
-  cancel_url: `${origin}/?canceled=1`,
-
-  // ✅ attach identifiers
-  metadata: {
-    bookingRef: booking.bookingRef,      // e.g. "LDR-2025-000123"
-    bookingId: booking.id,               // your uuid
-    dropoff: booking.dropoffDate,
-    pickup: booking.pickupDate,
-  },
-
-  // optional (helpful for receipts/invoices)
-  customer_email: booking.email || undefined,
-});
-
